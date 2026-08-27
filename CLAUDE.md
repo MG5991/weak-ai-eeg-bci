@@ -1,0 +1,185 @@
+# CLAUDE.md — project context for `eeg-app`
+
+## What this project is
+Software + cross-dataset benchmark for a PhD (candidate-of-science) with the topic:
+**"Models and Methods for Human–IoT interaction using Weak AI."**
+Weak AI = **narrow / task-specific** AI (not low quality, not weak-learner). The system classifies
+motor-imagery (MI) EEG into commands that drive a **virtual** IoT device (drone/lamp).
+
+The aspirantura defense is already **passed**. This repo is the **post-defense** work that feeds
+three journal papers and, later, the extended dissertation.
+
+## HARD CONSTRAINTS (read before coding)
+- **Everything is offline and virtual.** No real hardware, **no MQTT**, no live Emotiv streaming.
+  The virtual drone/lamp IS the "IoT interaction." (An `actuators.py` with an MQTT class exists but
+  is **abandoned** — use only `SimActuator`; do not build toward real devices.)
+- **Honest framing is mandatory.** Cross-subject accuracies are ~0.55–0.69 without `--subject-norm`:
+  above 0.50 chance, below the ~0.70 practical BCI-control threshold → describe as **"preliminary
+  feasibility."** One config now crosses that line — BCI-IV-2b all+`--subject-norm` hits **0.707**
+  (LogR/Shrinkage-LDA tied) — but treat it as a single-dataset, 9-subject, low-fold-power result, not
+  proof the threshold is generally cleared; still frame the overall system as preliminary feasibility.
+- **Self-Training does NOT beat supervised** on these datasets. Frame as **label-efficiency /
+  graceful degradation**, never as an accuracy gain. (The old thesis-deck claim "20% labels beat
+  100% supervised" did NOT reproduce — do not repeat it.)
+- On the **Emotiv** dataset (baseline, no `--subject-norm`) all 8 models are **statistically tied**
+  (paired Wilcoxon, 10 folds, Holm-Bonferroni corrected — verified in this repo now, see
+  `significance.py`) — do not claim a winner there. Same result holds with `--subject-norm` and with
+  `--channels motor`: still all tied, despite the wider spread in mean accuracy — with only 10 folds
+  the corrected test has low power (contrast with PhysioNet's 109 folds below, where it clearly
+  differentiates models). Don't read "all tied" as "no dataset shows real differences" — it's a
+  small-sample-size artifact specific to the low-participant-count datasets.
+- Bands are **harmonized** to the Emotiv 6-band set everywhere (4–8, 8–12, 12–18, 18–25, 25–32,
+  32–40 Hz). Post-harmonization numbers **supersede** any earlier ones (e.g. old 2b 0.664 is stale).
+- **Emotiv EPOC X has no C3/C4.** Its "motor" channel subset = **F3,F4,FC5,FC6** (premotor);
+  trimming to it LOWERS accuracy (a hardware-limitation finding). For 10-20 datasets, motor = C3/Cz/C4+neighbours.
+
+## Environment (Linux + PyCharm)
+- Debian/Ubuntu, Python 3.12, **externally-managed** → must use the venv.
+  `source ~/eeg-app/.venv/bin/activate` (prompt shows `(.venv)`). Use `python`, not `python3`, inside it.
+- Deps: numpy, scipy, scikit-learn, pandas, matplotlib, moabb, mne, xgboost (optional).
+- MOABB downloads datasets on first use (needs internet once; cached after).
+
+## Files
+- `eeg_engine.py` — **main entry**. Loads a dataset, auto-selects channels, extracts harmonized
+  band-power features, optionally applies `--asymmetry` / `--subject-norm` feature transforms, runs
+  the model roster under Leave-One-Participant-Out (LOPO), prints a comparison table marked with
+  `*`/`~` (see `significance.py`), and writes `results_master.csv` + `folds_master.json` +
+  `playback_*.json` + appends a run summary to `RESULTS_LOG.md`.
+- `significance.py` — shared stats helpers: `holm_bonferroni`, `pairwise_significance` (paired
+  Wilcoxon across folds between every model pair, Holm-Bonferroni corrected). Used by both
+  `eeg_engine.py` and `summarize.py` — keep the two in sync if you change the correction method.
+- `summarize.py` — reads `results_master.csv` + `folds_master.json` → writes `summary_report.md`:
+  a cross-dataset accuracy pivot (same `*`/`~` convention) + a hand-maintained "why" table
+  (`DATASET_INFO` dict in the script — add an entry there for any new dataset you benchmark).
+- `mi_experiment.py` — ML core (band-power extraction, self-training, `evaluate`, `print_table`).
+  `BANDS` is harmonized. (Also has CSP/FBCSP/Riemannian — **not used** by the engine anymore.)
+- `run_me.py` — one-click launcher (runs the engine on the CSV with `--subject-norm` by default;
+  edit `DATASET=` to change file).
+- `EEG_control_prototype.html` — browser demo. Buttons: Load sample / Upload CSV / **Load playback**.
+  Animates a virtual drone/lamp from a `playback_*.json`; confidence threshold → **IDLE** fail-safe.
+  Header accuracy badge (`#lopo`/`#lopo2`) is dynamic: shows the loaded playback's own accuracy,
+  reverts to the embedded JS model's fixed accuracy on Load sample / Upload CSV.
+- `requirements.txt`, `RESULTS_LOG.md` (auto-appended lab notebook, one entry per `eeg_engine.py` run).
+- `summary_report.md` — auto-generated by `summarize.py` (do not hand-edit): cross-dataset accuracy
+  pivot (9 dataset/channel rows × 8 models, `*`/`~` convention) + the hand-maintained why-table.
+  Re-run `summarize.py` to refresh it after any new `eeg_engine.py` run.
+- `eeg_dataset_emotiv.csv` — the user's data (below).
+- `train_model.py` — trains ONE roster model (`--model {svm,lda,logreg,rf,xgb,mlp,dt}`) on ALL
+  trials of a dataset and saves a `model.joblib` bundle: fitted estimator + fitted `StandardScaler`
+  + feature spec (channel mode, bands, ordered feature names) + class→command map + metadata
+  (model, dataset, channels, `--subject-norm` flag, honest LOPO acc±std, n_train, sklearn version,
+  timestamp). The honest accuracy is computed via `eeg_engine.lopo_single_model()` — the same
+  per-fold LOPO protocol as the comparison table — never resubstitution.
+- `classify.py` — loads a `model.joblib` bundle and predicts **without retraining**, then writes a
+  `playback_*.json`. If the bundle was trained `--subject-norm`, it redoes per-subject z-score
+  calibration on the new data's own trials before scoring (a subject can't be scored on raw
+  features against a subject-norm-trained scaler). Guards against channel/feature-count mismatch
+  (a bundle trained on one dataset/montage can't classify a different-shaped one) with a clear
+  error. Always prints the bundle's honest LOPO accuracy alongside the given-data accuracy, since
+  the latter is resubstitution whenever it's run on the bundle's own training data.
+- `test_persistence.py` — regression test for `train_model.py`/`classify.py`'s `--subject-norm`
+  calibration: trains on 9 participants, classifies the 1 held-out participant (subprocess, real
+  CLI), and asserts mean held-out accuracy tracks the honest LOPO estimate (not the ~0.815
+  resubstitution accuracy you'd get classifying a bundle's own training data). `--quick` runs 3
+  participants instead of 10. Re-run after touching `--subject-norm` / persistence code.
+- **Not yet created** (planned, do not assume it exists): `actuators.py` — despite being mentioned
+  under HARD CONSTRAINTS as a cautionary note (don't build an MQTT actuator class), it does not
+  currently exist in this repo; `SimActuator` (virtual only) is the only actuator in use.
+
+## IN PROGRESS — resume here
+The full benchmark matrix, including `--subject-norm` on every dataset, is now populated:
+`folds_master.json`/`results_master.csv` cover Emotiv (all, motor, all+subjnorm), BCI-IV-2b (all,
+all+subjnorm), and PhysioNet (all-64ch, motor-19ch, all+subjnorm, motor+subjnorm) — 72 rows total.
+`summarize.py` has been re-run and `summary_report.md` reflects all of it. The subject-norm
+generalization question is answered (see Verified Results below).
+
+Model persistence is also now done: `train_model.py` + `classify.py` (see Files above), including
+the `--subject-norm` per-subject calibration step at inference time. Verified end-to-end on the
+Emotiv CSV both with and without `--subject-norm` (LDA and SVM), including the feature-mismatch
+guard. Next up: the three journal papers — see REMAINING WORK.
+
+## Model roster (feature-based, identical on every dataset)
+Decision Tree · Random Forest · XGBoost (→ HistGradientBoosting if `xgboost` missing, labeled
+"XGBoost/HGBT") · Shrinkage-LDA · Logistic Regression · MLP(64) · SVM-RBF (supervised, 100%) ·
+Self-Training SVM-RBF (20% labels). **CSP/FBCSP/Riemannian were removed** from the comparison per the user.
+
+## Data formats
+- **Feature CSV** (the user's): columns ending `__feat`, named `eeg.<ch>_<lo>_<hi>Hz__feat`
+  (14 channels × 6 bands = 84), plus `movement` (0/1 label) and `participant`. No raw signals →
+  CSP/Riemannian can't run on it (only feature-based models).
+- **Raw npz**: `X[n_trials,n_ch,n_samp]`, `y`, `groups`, `sfreq`, `ch_names`.
+- **MOABB**: `--dataset 2b` (BCI-IV-2b, binary L/R hand), `--dataset physionet` (PhysioNet MI L/R hand),
+  `--dataset 2a`.
+
+## Common commands
+```bash
+# your data (subject-norm on, the current best-known config for this dataset)
+python eeg_engine.py --csv eeg_dataset_emotiv.csv --subject-norm
+python eeg_engine.py --csv eeg_dataset_emotiv.csv --channels motor
+# public datasets (raw)
+python eeg_engine.py --dataset 2b --channels all
+python eeg_engine.py --dataset physionet --channels all
+python eeg_engine.py --dataset physionet --channels motor
+# summary across everything (run after folds_master.json covers all datasets/configs)
+python summarize.py
+# model persistence: train once, classify/replay without retraining
+python train_model.py --csv eeg_dataset_emotiv.csv --subject-norm --model lda --out model.joblib
+python classify.py --model model.joblib --csv eeg_dataset_emotiv.csv
+python test_persistence.py   # regression test: held-out-participant accuracy vs honest LOPO
+# demo: open EEG_control_prototype.html in a browser -> Load playback -> playback_*.json
+```
+Flags: `--channels {all,motor,motor-wide}`, `--no-compare` (fast, skip roster), `--save-table FILE`
+(default `results_master.csv`), `--label-frac 0.20`, `--subject-norm` (z-score each participant's
+features using only their own trials before pooling — biggest accuracy lever found so far on the
+Emotiv CSV), `--asymmetry` (append left-right hemispheric band-power difference features — **tried,
+made things worse**, kept as an opt-in flag, not recommended).
+
+## Verified results so far (harmonized bands, LOPO, cross-subject)
+- **Emotiv** (10 subj, 813 trials): all-14ch best RF 0.595 but **all 8 models tied**; motor-4 best LDA 0.566.
+- **Emotiv + `--subject-norm`** (new): best jumps to **Shrinkage-LDA 0.658** (was XGBoost 0.606
+  without it) — z-scoring each participant's own features before pooling removes most of the
+  inter-subject baseline shift (skull/impedance/arousal), which was the dominant error source, not
+  model choice. Macro-F1 also converges to accuracy (0.657 vs 0.658), i.e. less class bias. This is
+  now the default in `run_me.py`.
+- **`--subject-norm` generalizes, but the size of the gain scales inversely with the dataset's
+  existing montage quality** — confirmed by re-running BCI-IV-2b and PhysioNet with it:
+  - BCI-IV-2b all+subjnorm: **0.707** (LogR/Shrinkage-LDA tied), up from 0.689 (+0.018) — still all
+    8 models tied with best.
+  - PhysioNet all+subjnorm: **0.620** (SVM-RBF), up from 0.595 (+0.025), tied with LogR/LDA/XGBoost.
+  - PhysioNet motor+subjnorm: **0.600** (Shrinkage-LDA), up from 0.589 (+0.011), tied with
+    LogR/RF/SVM/XGBoost.
+  - Emotiv (worst native montage — no C3/C4) got by far the biggest lift (+0.052); the two clean
+    10-20 montages got smaller but still real lifts (+0.011 to +0.025). Interpretation: subject-norm
+    mainly removes inter-subject baseline shift, and that shift is a bigger fraction of total error
+    when the montage itself is weaker — it's not just an "Emotiv quirk."
+- **Emotiv + `--asymmetry`** (new): left-right hemispheric band-power difference features, tried and
+  **rejected** — dropped every model's accuracy (best 0.606→0.589). Likely overfits given only 813
+  trials / 10 subjects for 42 extra features. Flag still exists but don't default to it.
+- **BCI-IV-2b** (9 subj): all (C3/Cz/C4) best Shrinkage-LDA 0.689, LogR 0.685 (tied with best);
+  Random Forest/XGBoost/SVM/Self-Training also tied; only Decision Tree (0.560) is not.
+- **PhysioNet** (109 subj): all-64ch best Logistic Regression 0.595, Shrinkage-LDA/MLP/SVM/XGBoost
+  tied with it; Random Forest (0.544), Self-Training (0.535), Decision Tree (0.511) are **not** tied
+  — with 109 folds the significance test has real power, unlike the ~10-fold datasets above.
+  motor-19ch (FC/C/CP row, no true C3/Cz/C4-only trim available in this montage): best Logistic
+  Regression 0.589, tied with Shrinkage-LDA (0.588) and MLP (0.571) — trimming from 64→19 channels
+  cost only ~0.006 accuracy, unlike Emotiv where trimming to motor proxy channels hurt much more.
+- Pattern: **linear models (LDA/LogR) win/tie** on clean montages; **accuracy tracks montage
+  motor-coverage, not channel count** — confirmed starkly by `summary_report.md`'s why-table:
+  BCI-IV-2b's 3-channel dedicated C3/Cz/C4 montage (0.689) beats PhysioNet's 64-channel full-scalp
+  montage (0.595) despite having 1/20th the channels; Self-Training ≤ supervised everywhere.
+
+## REMAINING WORK (in priority order)
+1. ~~**Model persistence**~~ — DONE: `train_model.py` + `classify.py` (see Files above).
+2. **Papers** — Paper 1 (feasibility, from the thesis), Paper 2 (the software/implementation),
+   Paper 3 (the cross-dataset benchmark + significance + why-table). Language (VAK Russian vs
+   Scopus English) is TBD with the supervisor.
+3. **Later** — Russian translation of the defended ~150-page dissertation incl. captions; regenerate
+   script-based figures (cortex diagram, result plots) with Russian labels.
+
+## Gotchas
+- Keep `eeg_engine.py`, `mi_experiment.py`, `significance.py`, `summarize.py` in the SAME folder
+  (engine and summarize both import from these).
+- `xgboost` optional; without it you get the HGBT fallback (fine).
+- Re-running a dataset+channels config **overwrites** its rows in `results_master.csv` (dedup by
+  dataset|channels|model) and refreshes its folds — safe to re-run.
+- Do not reintroduce CSP/FBCSP/Riemannian or MQTT unless the user explicitly asks.
